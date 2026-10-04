@@ -1,0 +1,15 @@
+# Reference unit (see BOX-CONTRACT.md). The plugin starts it with
+# `sudo -n systemctl start --no-block project-repos.service` after writing the
+# manifest. Install: copy project-repos-sync.sh to /usr/local/bin/ (chmod 755),
+# this file to /etc/systemd/system/, then `systemctl daemon-reload`.
+[Unit]
+Description=Clone the repos listed in ~/.project-repos.txt (bb-plugin-boat)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=user
+Environment=HOME=/home/user
+ExecStart=/usr/local/bin/project-repos-sync.sh
+TimeoutStartSec=1200

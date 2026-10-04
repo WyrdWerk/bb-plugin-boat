@@ -1,0 +1,3 @@
+components/, lib/ and hooks/ are vendored from the bb plugin scaffold
+(`bb plugin new`, https://github.com/get-bb/bb), MIT License,
+Copyright (c) 2026 Michael Yong.
