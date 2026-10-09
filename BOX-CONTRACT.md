@@ -95,10 +95,24 @@ by installing an unrelated dependency or using an isolated npm copy for enrollme
 | git credentials for private repos (e.g. `GITHUB_TOKEN` + `gh auth setup-git`) | Cloning private repos on the box | Private clones fail |
 | Its own bb server (`bb-app.service`, `/usr/local/sbin/bb-ensure.sh`) | Nothing: if the base runs a standalone bb server, the conversion turns it off on every runner and unpublishes it from the tailnet | Conversion skips those steps |
 
+**Sharp edge (verified live 2026-10-09):** the base's `project-repos-sync.sh`
+deletes any `~/workspace/repos/<name>` that is *not* named in
+`~/.project-repos.txt` at boot ("removed foreign repo", `rm -rf`). If you add
+a bb project source on the box whose checkout lives inside
+`~/workspace/repos`, register it in the manifest first or place the checkout
+outside that directory; otherwise the next boot silently removes it and
+`bb thread spawn` fails with "This project checkout has no usable git branch".
+
 Conversion verifies that the standalone server is unpublished. The Amp-orb test twice
 failed that check with `bb-server-still-on-tailnet` after the server stopped; a later
-identical Serve reset succeeded. Concurrent boot publication is suspected but not proven.
-Do not treat this check as passed merely because `bb-app.service` is inactive.
+identical Serve reset succeeded. **Mechanism confirmed by the 2026-10-09 pass run:** it
+is a boot-publication race — settle waits only for `tailscale-rejoin`, but
+`pi-boot-init` can still be running and calls `bb-ensure.sh`, whose
+`tailscale serve --https=443 → 127.0.0.1:38886` republish lands between the
+conversion's `serve off/reset` and its verify. `chmod -x` and the `sed -i`
+marker guard cannot stop an already-running `bb-ensure.sh` instance (bash
+keeps executing the old inode). Do not treat this check as passed merely
+because `bb-app.service` is inactive.
 
 ## What the plugin installs on each runner (never on the base)
 

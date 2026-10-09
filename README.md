@@ -5,11 +5,14 @@ thread can get its own fresh cloud box, forked from a base box you prepared once
 agents, credentials and repos ready. bb on your own machine stays the hub; the boxes are
 disposable runners.
 
-> **Status: experimental, v0.1.** An earlier hub completed the end-to-end lifecycle, but
-> the **2026-10-09 Amp-orb hub acceptance test failed**. Automatic enrollment succeeded
-> once; no LLM thread ran and automatic reconnect did not pass. See the
-> [acceptance record](#live-acceptance-status) and [base box contract](BOX-CONTRACT.md).
-> Manual enrollment and mocked tests do not establish that the automatic path works.
+> **Status: experimental, v0.1.** An earlier hub completed the end-to-end lifecycle, and
+> the **2026-10-09 Amp-orb hub acceptance test passed in full** (create → conversion →
+> enrollment → real LLM thread with an independently verified result → suspend/resume
+> with the same identity → removal), after an earlier same-day run failed. Two known
+> issues remain open (a conversion boot-publication race and an idle-suspend-after-resume
+> bug); see the [acceptance record](#live-acceptance-status) and
+> [base box contract](BOX-CONTRACT.md). Manual enrollment and mocked tests do not by
+> themselves establish that the automatic path works.
 
 ## What it does
 
@@ -114,21 +117,52 @@ bb thread spawn --project '<project-id>' --machine '<machine-id>' \
 
 ## Live acceptance status
 
-The 2026-10-09 test used the stock v0.1 plugin on an Amp-orb bb 0.45 hub. Five owned
-forks were attempted, and all five were removed afterwards:
+**Full acceptance passed on 2026-10-09** (second attempt, thread
+T-01a12020): on a fresh Amp-orb bb 0.45 hub with the stock v0.1 plugin, one
+provider-owned fork completed the entire flow — automatic create →
+conversion → enrollment, a real LLM thread whose box-only fixture result
+matched an independently computed answer, provider suspend, **two resumes
+that each reconnected with the same identity**, more real LLM work after
+resume, thread-environment cleanup, and provider removal (machine record
+and Boat box both gone). Mid-test the orb's 3 GiB workload slice
+OOM-killed bb and the on-demand Tailscale daemon; after a fresh
+human-approved Tailscale connect and a Serve republish the runner
+reconnected automatically with the same identity.
 
-| Path | Observed result |
-|---|---|
-| Automatic fork → conversion → enrollment | Passed once, including a real host-daemon session; two other forks failed with `Runner conversion failed: bb-server-still-on-tailnet` |
-| Real remote LLM thread and independently checked result | **Not reached** |
-| Plugin suspend → resume → reconnect | Suspend passed; reconnect failed. The orb exhausted its 3 GiB workload memory limit during the enrolled attempt; the bb and Tailscale processes were killed |
-| Provider removal / failure cleanup | Passed for the failed or unused test machines; removal after an LLM thread and its environment cleanup was **not reached** |
-| Two later creates and resume attempts | Failed with ``Boat API 502 box_direct_failed: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()`` |
+| Path | Observed result (pass run) | Notes |
+|---|---|---|
+| Automatic fork → conversion → enrollment | Passed | `runner-conversion=ok bb-app=inactive/disabled port38886=free serve=off runner-ensure=ok` |
+| Real remote LLM thread and independently checked result | **Passed** | claude-sonnet-5-5 in a worktree of a remote Git clone; fixture answer matched independently computed values |
+| Plugin suspend → resume → reconnect | **Passed** | Two resumes, same identity each time |
+| More work after resume | **Passed** | Second thread (haiku) read persisted state and computed a new verified result |
+| Provider removal after environment cleanup | **Passed** | Machine record and box gone (Box API 404) |
 
-The 502 cause remains unresolved. Runner-to-hub HTTPS was later verified with TLS
-validation and HTTP 200, so broadening the access rule or disabling TLS verification is
-not an established fix. The separate earlier manual enrollment/remote-command/reconnect
-test passed, but does not validate automatic conversion or an LLM thread.
+### Known issues confirmed by the pass run
+
+- **`bb-server-still-on-tailnet` is a boot-publication race.** Settle waits
+  only for `tailscale-rejoin`; `pi-boot-init` (which calls `bb-ensure.sh` →
+  `tailscale serve --https=443 → 127.0.0.1:38886`) can still be running.
+  `chmod -x` and the `sed -i` marker guard cannot stop an already-running
+  `bb-ensure.sh` instance (bash keeps executing the old inode). If it
+  publishes between the conversion's `serve off/reset` and its verify, the
+  check fails. Fix directions: settle should also wait for `pi-boot-init`
+  (or for no running `bb-ensure.sh`); the unpublish should retry (bounded)
+  until `served` is false.
+- **Lifecycle bug: idle suspend fires immediately after resume.** `resume()`
+  never resets the stored `lastActive`, so the idle sweep suspended a
+  freshly resumed idle machine 25 s after resume completed. Workaround:
+  `bb plugin config boat set idleMinutes 0`. Fix: set `lastActive` when
+  resume completes.
+- The earlier ``502 box_direct_failed: The socket connection was closed
+  unexpectedly`` did **not** reproduce across one create, two suspends and
+  two resumes; the cause remains unknown (Boat-side, intermittent). The
+  fail-fast on non-restoring 502s remains correct — a closed socket does
+  not prove the command never ran.
+
+The first same-day run (five owned forks) failed as recorded in the
+project's Sandbox Experiments log; its evidence led to the npm/contract
+documentation. The separate manual enrollment/remote-command/reconnect test
+passed earlier and does not, by itself, validate automatic conversion.
 
 For a complete acceptance run, use one owned runner at a time and:
 
