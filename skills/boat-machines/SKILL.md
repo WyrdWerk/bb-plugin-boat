@@ -9,6 +9,12 @@ The `boat` machine provider runs bb threads on Boat sandboxes enrolled as bb
 machines. Core does enrollment, checkout setup and the machine record; the
 plugin allocates, stops, resumes and deletes boxes.
 
+**Acceptance limit (2026-10-09):** the Amp-orb hub test enrolled one automatic
+runner, but no LLM thread ran and automatic reconnect failed. Failed/unused
+runner removal passed; post-thread environment cleanup was not reached.
+Do not report a full pass from a connected machine or the historical hub test.
+See the [acceptance record](../../README.md#live-acceptance-status).
+
 ## Setup
 
 Plugin settings (`bb plugin config boat`): `apiKey` (secret, a team-wallet Boat
@@ -18,9 +24,16 @@ key), `org` (team wallet id or name, never personal), `source` (`snapshot` or
 `renameProbeOk` (default 6), `renameProbeTimeoutMinutes` (default 20),
 `githubOwners`, `createMissingProjects`. Never print the key.
 
+Have the owner enter `apiKey` in bb's plugin settings, not command arguments.
+For bb 0.45, match the current HTTPS origin in `BB_APP_URL`, `machineServerUrl`
+and Tailscale Serve, and select `defaultMachineAccess direct`. Verify HTTPS
+from the runner with normal TLS checks. A TCP 443 grant is sufficient when
+Serve publishes that port; do not broaden policy to diagnose a 502.
+
 New machines are **forks of the base box** named in `from` (with `source=fork`).
 The base is never modified: only forked. What the base box must provide is in the
-plugin's `BOX-CONTRACT.md`. At
+plugin's [BOX-CONTRACT.md](../../BOX-CONTRACT.md), including complete npm and
+safe updater ordering. At
 create the provider converts the fork into a runner: the box's own bb server is
 blocked (`/etc/bb-runner-mode`), it's unpublished from the tailnet, runner-ensure is
 installed, and the result is verified. A failed conversion fails the create with
@@ -58,9 +71,18 @@ bb machine remove <machine> --yes --json                    # deletes the box
 - Agent updates on the box finish ~8–10 min after ready. The result line
   (`pi=ok codex=ok …`) shows in the machine progress or the plugin log and in the
   Boat page's "Agents" column. Machines don't wait for it unless
-  `waitForAgentUpdates` is on.
+  `waitForAgentUpdates` is on. That marker wait follows conversion, is bounded
+  to 15 minutes and continues on timeout; it is not a strict successful-update
+  barrier. Before a manual installer or repair, require completion of this
+  resume's updater invocation, not an initial inactive unit or stale marker.
 - Before Boat's auto-stop (TTL) it extends the TTL while work is running and
   otherwise suspends through bb. Idle machines suspend after `idleMinutes`.
+
+For `bb-server-still-on-tailnet`, verify the publication itself, not only the
+stopped server. For Boat `502 box_direct_failed` / socket closure, execution
+may have happened before the response was lost. Inspect the same machine/box
+and logs before replaying commands or allocating another fork. Neither error
+has a proven root-cause fix from the Amp-orb test.
 
 ## Boat page
 
