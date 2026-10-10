@@ -7,8 +7,9 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { BoatApi } from "../src/boat-api.ts";
-import { parseConversionResult, runnerConversionCommand, runnerConversionScript, unpublishServeScript } from "../src/conversion.ts";
+import { CONVERSION_TIMEOUT_MS, parseConversionResult, runnerConversionCommand, runnerConversionScript, RUNNER_ENSURE_TIMEOUT_S, SERVE_CMD_TIMEOUT_S, SERVE_PROBE_TIMEOUT_S, UNPUBLISH_ATTEMPTS, unpublishServeScript } from "../src/conversion.ts";
 import { createDashboardHandlers } from "../src/dashboard.ts";
+import { MAX_COMMAND_SECONDS } from "../src/executor.ts";
 import { BoatMachineOps, type ProviderConfig } from "../src/provider.ts";
 import { BB_RUNNER_GUARD_SH, RUNNER_ENSURE_SH } from "../src/runner-files.generated.ts";
 import { actionsFor } from "../ui/actions.ts";
@@ -135,6 +136,30 @@ describe("conversion unpublishes the box's own bb server with a bounded retry (T
     const r = run("true", 15);
     assert.equal(r.probes, "probes=30", "15 attempts × (off check + reset check)");
     assert.equal(r.calls.length, 30);
+  });
+});
+
+describe("conversion timeout budget (T19)", () => {
+  // Boat runs one synchronous command for at most MAX_COMMAND_SECONDS, and the
+  // executor clamps the conversion's timeout to it. The script's own hard `timeout`
+  // bounds must therefore sum below the conversion timeout, or a slow box can be
+  // killed mid-conversion (e.g. before runner-ensure completes).
+  const script = runnerConversionScript();
+  const perAttemptS = SERVE_PROBE_TIMEOUT_S * 2 + SERVE_CMD_TIMEOUT_S * 2 + 2; // served, off, served, reset, sleep
+  const unpublishS = UNPUBLISH_ATTEMPTS * perAttemptS + SERVE_PROBE_TIMEOUT_S; // + the verify's own probe
+  const listeningS = 20 * 3; // up to 20 × (timeout 2 + sleep 1)
+  const fixedSlackS = 120; // local systemctl / heredoc steps
+  const worstS = unpublishS + RUNNER_ENSURE_TIMEOUT_S + listeningS + fixedSlackS;
+
+  it("fits the worst-case bounded steps inside the conversion timeout", () => {
+    assert.ok(worstS * 1000 < CONVERSION_TIMEOUT_MS, `worst case ${worstS}s >= conversion timeout ${CONVERSION_TIMEOUT_MS / 1000}s`);
+    assert.ok(CONVERSION_TIMEOUT_MS <= MAX_COMMAND_SECONDS * 1000, "Boat caps one synchronous command at MAX_COMMAND_SECONDS");
+  });
+
+  it("wires the budget constants into the generated script", () => {
+    assert.ok(script.includes(`timeout ${RUNNER_ENSURE_TIMEOUT_S} systemctl restart bb-runner-ensure.service`));
+    assert.ok(script.includes(`timeout ${SERVE_PROBE_TIMEOUT_S} tailscale serve status`));
+    assert.ok(script.includes(`timeout ${SERVE_CMD_TIMEOUT_S} tailscale serve --https=443 off`));
   });
 });
 

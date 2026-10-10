@@ -9,7 +9,7 @@ export interface Progress {
   log(text: string): void;
 }
 import { BoatApi, BoatApiError, canonicalCode, type Box, type BoxSource, type CreateBoxRequest, LIVE_STATES, STOPPED_STATES, STOPPING_STATES } from "./boat-api.ts";
-import { parseConversionResult, runnerConversionCommand } from "./conversion.ts";
+import { CONVERSION_TIMEOUT_MS, parseConversionResult, runnerConversionCommand } from "./conversion.ts";
 import { type AgentEnvResult, agentEnvScript, parseAgentEnv, parseSkillStoreCleanup, parseTmpCleanup, skillStoreCleanupScript } from "./boxprep.ts";
 import { BEFORE_STOP, DEFER_ACTIONS, describeBlockers, type EnvBlocker, type EnvGuardOptions, type EnvLite, envBlockers, recoveryHint } from "./envguard.ts";
 import { DEFAULT_RENAME_GATE, parseRenameProbe, renameGateStep, renameProbeCleanupScript, renameProbeScript } from "./fsgate.ts";
@@ -618,7 +618,7 @@ export class BoatMachineOps {
     const { exitCode } = await executor.exec({
       command: runnerConversionCommand(),
       stdin: "",
-      timeoutMs: 420_000,
+      timeoutMs: CONVERSION_TIMEOUT_MS,
       signal,
       onOutput: (chunk) => {
         out += chunk;
