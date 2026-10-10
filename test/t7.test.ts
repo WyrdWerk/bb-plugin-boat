@@ -39,7 +39,10 @@ describe("self-safe pkill/pgrep patterns (T7 fix 1)", () => {
   const patterns = Object.entries(SCRIPTS).flatMap(([name, s]) => pkillPatterns(s).map((p) => ({ name, p })));
 
   it("finds the patterns it must check", () => {
-    assert.deepEqual(patterns.map((x) => x.p).sort(), ["[b]b-app[ /]host-daemon", "[b]b-app[ /]host-daemon", "[b]b-app[ /]host-daemon", "[b]in/bb-app --server-bind-host"].sort());
+    assert.deepEqual(
+      patterns.map((x) => x.p).sort(),
+      ["[b]b-app[ /]host-daemon", "[b]b-app[ /]host-daemon", "[b]b-app[ /]host-daemon", "[b]b-ensure\\.sh( |$)", "[b]in/bb-app --server-bind-host"].sort(),
+    );
   });
 
   it("no pattern matches any generated script's own text or command line", () => {
@@ -65,6 +68,15 @@ describe("self-safe pkill/pgrep patterns (T7 fix 1)", () => {
     assert.ok(new RegExp("[b]b-app[ /]host-daemon").test(daemon), "launcher");
     assert.ok(new RegExp("[b]b-app[ /]host-daemon").test("node /home/user/.bb-machines/hub.example-tailnet.ts.net-3888/npm/lib/node_modules/bb-app/host-daemon/dist/daemon-bundle.mjs"), "daemon bundle");
     assert.ok(new RegExp("[b]in/bb-app --server-bind-host").test("node /home/user/.nvm/versions/node/v24.19.0/bin/bb-app --server-bind-host 0.0.0.0"));
+  });
+
+  it("the bb-ensure pattern matches a running bb-ensure.sh, not the script text that names the path", () => {
+    const re = () => new RegExp("[b]b-ensure\\.sh( |$)");
+    assert.ok(re().test("bash /usr/local/sbin/bb-ensure.sh"), "interpreter form");
+    assert.ok(re().test("/usr/local/sbin/bb-ensure.sh"), "direct form");
+    assert.ok(re().test("/usr/local/sbin/bb-ensure.sh --now"), "with args");
+    assert.ok(!re().test('B=/usr/local/sbin/bb-ensure.sh\n[ -f "$B" ]'), "the conversion's assignment is not a running process");
+    assert.ok(!re().test("fail bb-ensure-still-executable"), "the conversion's failure slug");
   });
 
   it("real pgrep: the bracket pattern does not find its own shell, the plain one does", () => {

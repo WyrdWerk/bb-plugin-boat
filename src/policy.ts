@@ -87,6 +87,13 @@ export const SETTLE_PROBE_SCRIPT = [
   "set -u",
   'echo "verified=$([ -s /run/bb-runner/verified ] && echo yes || echo no)"',
   'echo "ensure=$([ -x /usr/local/sbin/runner-ensure.sh ] && echo yes || echo no)"',
+  // T19: a bb-ensure.sh process (started by pi-boot-init, tailscale-ensure or
+  // boat-heal) publishes the box's own bb server with `tailscale serve`. The
+  // conversion's chmod -x cannot stop an instance that is already running (bash
+  // keeps executing the old inode), so settle must see none running. `( |$)` keeps
+  // the pattern from matching any script text that merely names the path
+  // (T7: a pgrep -f pattern must never match a shell carrying a script).
+  'echo "ensure-running=$(pgrep -f \'[b]b-ensure\\.sh( |$)\' >/dev/null 2>&1 && echo yes || echo no)"',
   // T2/T8: Boat starts the snapshot's boot units itself after "ready" (~50–80 s), or
   // sometimes never (one base fork: 40 min). One line per unit:
   //   unit <name> <LoadState> <ActiveState> <Result> <ExecMainStartTimestampMonotonic>
@@ -124,6 +131,8 @@ export interface SettleSample {
   at: number;
   verified: boolean;
   ensureInstalled: boolean;
+  /** A bb-ensure.sh process is running (T19: it can re-publish the box's own bb server). */
+  ensureRunning: boolean;
   /** A required boot unit hasn't finished yet (not started by Boat, or still running). */
   bootPending: boolean;
   /** Per-unit state; empty when the probe had no unit lines. */
@@ -135,9 +144,10 @@ export interface SettleSample {
 }
 
 export function parseSettleProbe(stdout: string, at: number): SettleSample {
-  const sample: SettleSample = { at, verified: false, ensureInstalled: false, bootPending: false, bootUnits: {}, agentsMarker: null, repos: {} };
+  const sample: SettleSample = { at, verified: false, ensureInstalled: false, ensureRunning: false, bootPending: false, bootUnits: {}, agentsMarker: null, repos: {} };
   for (const line of stdout.split("\n")) {
     if (line.startsWith("verified=")) sample.verified = line.endsWith("yes");
+    else if (line.startsWith("ensure-running=")) sample.ensureRunning = line.endsWith("yes");
     else if (line.startsWith("ensure=")) sample.ensureInstalled = line.endsWith("yes");
     else if (line.startsWith("boot=")) sample.bootPending = line.endsWith("pending");
     else if (line.startsWith("unit ")) {
@@ -198,6 +208,22 @@ function sameRepos(a: Record<string, string[]>, b: Record<string, string[]>): bo
 }
 
 /**
+ * T19 conversion race: pi-boot-init calls bb-ensure.sh, which publishes the box's
+ * own bb server with `tailscale serve --https=443 → 127.0.0.1:38886`. If that is
+ * still running when the conversion runs, its `chmod -x` + marker guard cannot
+ * stop it (bash keeps executing the old inode), so it can re-publish after the
+ * conversion's serve off and fail the verify. Settle waits, bounded by the settle
+ * timeout, for pi-boot-init to finish and for no bb-ensure.sh process to run.
+ * `notstarted` counts as pending: settle itself starts the boot units Boat skipped.
+ */
+export function conversionRacePending(s: SettleSample): string | null {
+  const pi = s.bootUnits["pi-boot-init"];
+  if (pi === "running" || pi === "notstarted" || pi === "unknown") return `pi-boot-init has not finished (${pi})`;
+  if (s.ensureRunning) return "bb-ensure.sh is running (it can re-publish the box's own bb server)";
+  return null;
+}
+
+/**
  * T2 rule: after resume (or create from a snapshot) the box is settled when
  * runner-ensure has run (if installed) and every bb repo is clean, or matches the
  * dirty set recorded before suspend, in two samples at least `stableForMs` apart.
@@ -228,6 +254,9 @@ export function settleDecision(
         : "Boat has not started the box's units yet (tailscale-rejoin pending)",
     );
   }
+  // T19: don't convert while pi-boot-init/bb-ensure.sh can still publish the box.
+  const race = conversionRacePending(last);
+  if (race) return verdict(race);
   if (last.ensureInstalled && !last.verified) return verdict("runner-ensure has not run yet (Boat reboot semantics pending)");
   const expected = (path: string) => expectedDirty[path] ?? [];
   const unexpected = Object.entries(last.repos).filter(([p, names]) => names.join("\0") !== expected(p).join("\0"));
@@ -235,7 +264,7 @@ export function settleDecision(
     return verdict(`repos still changing: ${unexpected.map(([p, n]) => `${p.split("/").slice(-2).join("/")} (${n.length})`).join(", ")}`);
   }
   const earlier = samples.slice(0, -1).reverse().find((s) => last.at - s.at >= opts.stableForMs);
-  if (!earlier || !sameRepos(earlier.repos, last.repos) || earlier.bootPending || (earlier.ensureInstalled && !earlier.verified)) {
+  if (!earlier || !sameRepos(earlier.repos, last.repos) || earlier.bootPending || conversionRacePending(earlier) || (earlier.ensureInstalled && !earlier.verified)) {
     return verdict("waiting for a second matching sample");
   }
   return { status: "settled" };

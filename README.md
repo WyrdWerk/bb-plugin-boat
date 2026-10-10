@@ -145,14 +145,16 @@ reconnected automatically with the same identity.
   `chmod -x` and the `sed -i` marker guard cannot stop an already-running
   `bb-ensure.sh` instance (bash keeps executing the old inode). If it
   publishes between the conversion's `serve off/reset` and its verify, the
-  check fails. Fix directions: settle should also wait for `pi-boot-init`
-  (or for no running `bb-ensure.sh`); the unpublish should retry (bounded)
-  until `served` is false.
+  check fails. **Fixed in code (pending a live re-test):** settle now also
+  waits, bounded by its timeout, for `pi-boot-init` to finish and for no
+  `bb-ensure.sh` process to be running (`conversionRacePending` in
+  `src/policy.ts`), and the unpublish retries `serve off`/`reset` until
+  `served` is false (`unpublishServeScript` in `src/conversion.ts`).
 - **Lifecycle bug: idle suspend fires immediately after resume.** `resume()`
-  never resets the stored `lastActive`, so the idle sweep suspended a
-  freshly resumed idle machine 25 s after resume completed. Workaround:
-  `bb plugin config boat set idleMinutes 0`. Fix: set `lastActive` when
-  resume completes.
+  never reset the stored `lastActive`, so the idle sweep suspended a freshly
+  resumed idle machine 25 s after resume completed. **Fixed in code (pending a
+  live re-test):** `resume()` now resets the host's idle clock when it
+  completes (`markActive`, wired to the same storage key the sweep reads).
 - The earlier ``502 box_direct_failed: The socket connection was closed
   unexpectedly`` did **not** reproduce across one create, two suspends and
   two resumes; the cause remains unknown (Boat-side, intermittent). The

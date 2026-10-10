@@ -197,6 +197,9 @@ export default async function plugin(bb: BbPluginApi) {
     hubUrl: async () => (await bb.sdk.system.config()).serverAccess.effectiveUrl,
     // T14: environments on the host (lifecycle phase, retireAt, teardown status).
     listHostEnvironments: async (hostId) => (await bb.sdk.environments.list({ hostId, limit: 500 })) as unknown as EnvLite[],
+    // T19: resume resets the idle clock so the lifecycle sweep does not suspend a
+    // freshly resumed machine at its next tick.
+    markActive: (hostId) => bb.storage.kv.set(activeKey(hostId), Date.now()),
     countBusyThreads: async (hostId) =>
       (await bb.sdk.threads.count({ hostId, status: "starting" })).total + (await bb.sdk.threads.count({ hostId, status: "active" })).total,
     onAgentUpdates: (boxId, line) => {

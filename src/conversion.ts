@@ -55,9 +55,10 @@ export function runnerConversionScript(): string {
     "#    command line holds the script text (live run 2026-10-04: exit 143).",
     "pkill -u \"$U\" -f '[b]in/bb-app --server-bind-host' 2>/dev/null || true",
     "",
-    "# 2. Stop publishing it on the box's tailnet name.",
-    "if served; then timeout 15 tailscale serve --https=443 off >/dev/null 2>&1; fi",
-    "if served; then timeout 15 tailscale serve reset >/dev/null 2>&1; fi",
+    "# 2. Stop publishing it on the box's tailnet name. Retry: a concurrent",
+    "#    pi-boot-init (bb-ensure.sh) can re-publish after our off (settle waits",
+    "#    for it, but this is the backstop).",
+    unpublishServeScript(),
     "",
     "# 3. runner-ensure on every runner (fork identity guard, T1). No stamp here:",
     "#    runner-ensure itself wipes any copied identity, then stamps this box.",
@@ -125,4 +126,24 @@ export function parseConversionResult(stdout: string, exitCode: number): Convers
 /** argv for the executor: root via passwordless sudo, script as one bash -c argument. */
 export function runnerConversionCommand(): string[] {
   return ["sudo", "-n", "bash", "-c", runnerConversionScript()];
+}
+
+/**
+ * Stop publishing the box's own bb server, retrying until `served` is false.
+ * A concurrent pi-boot-init/bb-ensure.sh (or boat-heal) can re-publish between the
+ * off and the verify; `chmod -x` cannot stop an instance already running (bash
+ * keeps executing the old inode). Bounded so a stubborn publisher still ends; the
+ * default (6 attempts, ~2 s apart) stays well inside the conversion's 7-min budget.
+ * Expects `served` to be defined; uses `timeout`, `sleep` and `seq`.
+ */
+export function unpublishServeScript(attempts = 6): string {
+  return [
+    `for _ in $(seq 1 ${attempts}); do`,
+    "  served || break",
+    "  timeout 15 tailscale serve --https=443 off >/dev/null 2>&1 || true",
+    "  served || break",
+    "  timeout 15 tailscale serve reset >/dev/null 2>&1 || true",
+    "  sleep 2",
+    "done",
+  ].join("\n");
 }

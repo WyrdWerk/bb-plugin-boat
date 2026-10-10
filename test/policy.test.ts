@@ -115,6 +115,7 @@ describe("settle rule (T2)", () => {
     at,
     verified,
     ensureInstalled,
+    ensureRunning: false,
     bootPending: false,
     bootUnits: {},
     agentsMarker: null,
@@ -124,7 +125,7 @@ describe("settle rule (T2)", () => {
 
   it("parses the probe output", () => {
     const p = parseSettleProbe("verified=yes\nensure=yes\nrepo /h/c/repo 1 logs/a.log \nrepo /h/w/t/repo 0 \n", 5);
-    assert.deepEqual(p, { at: 5, verified: true, ensureInstalled: true, bootPending: false, bootUnits: {}, agentsMarker: null, repos: { "/h/c/repo": ["logs/a.log"], "/h/w/t/repo": [] } });
+    assert.deepEqual(p, { at: 5, verified: true, ensureInstalled: true, ensureRunning: false, bootPending: false, bootUnits: {}, agentsMarker: null, repos: { "/h/c/repo": ["logs/a.log"], "/h/w/t/repo": [] } });
   });
   it("waits while Boat has not started the snapshot's units (boot=pending)", () => {
     const pending = { ...s(0, {}, false, false), bootPending: true };
