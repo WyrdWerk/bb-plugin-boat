@@ -9,7 +9,7 @@ export interface Progress {
   log(text: string): void;
 }
 import { BoatApi, BoatApiError, canonicalCode, type Box, type BoxSource, type CreateBoxRequest, LIVE_STATES, STOPPED_STATES, STOPPING_STATES } from "./boat-api.ts";
-import { parseConversionResult, runnerConversionCommand } from "./conversion.ts";
+import { CONVERSION_TIMEOUT_MS, parseConversionResult, runnerConversionCommand } from "./conversion.ts";
 import { type AgentEnvResult, agentEnvScript, parseAgentEnv, parseSkillStoreCleanup, parseTmpCleanup, skillStoreCleanupScript } from "./boxprep.ts";
 import { BEFORE_STOP, DEFER_ACTIONS, describeBlockers, type EnvBlocker, type EnvGuardOptions, type EnvLite, envBlockers, recoveryHint } from "./envguard.ts";
 import { DEFAULT_RENAME_GATE, parseRenameProbe, renameGateStep, renameProbeCleanupScript, renameProbeScript } from "./fsgate.ts";
@@ -144,6 +144,11 @@ export interface ProviderDeps {
   /** Hub gate bound (default 6 min) and interval (default 10 s). */
   hubGateMaxMs?: number;
   hubGateIntervalMs?: number;
+  /**
+   * Reset a host's idle clock. Called when resume completes so the lifecycle sweep
+   * does not see the pre-suspend lastActive and suspend the box at once (T19).
+   */
+  markActive?: (hostId: string) => Promise<void>;
 }
 
 /** Exactly what create sent to Boat, so a replay is byte-identical. Non-secret. */
@@ -613,7 +618,7 @@ export class BoatMachineOps {
     const { exitCode } = await executor.exec({
       command: runnerConversionCommand(),
       stdin: "",
-      timeoutMs: 420_000,
+      timeoutMs: CONVERSION_TIMEOUT_MS,
       signal,
       onOutput: (chunk) => {
         out += chunk;
@@ -761,6 +766,9 @@ export class BoatMachineOps {
       await this.verifyProject(executor, box.id, hostId, resource.project, config, report, signal);
     }
     this.startAfterEnrollWatch(api, box.id, hostId, { markerSeen, envSettled: env.bws });
+    // T19: reset the idle clock now that resume is done, or the sweep sees the
+    // pre-suspend lastActive and suspends the box on its next tick.
+    await this.deps.markActive?.(hostId);
     return resource;
   }
 

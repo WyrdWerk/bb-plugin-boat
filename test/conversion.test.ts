@@ -7,8 +7,9 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { BoatApi } from "../src/boat-api.ts";
-import { parseConversionResult, runnerConversionCommand, runnerConversionScript } from "../src/conversion.ts";
+import { CONVERSION_TIMEOUT_MS, parseConversionResult, runnerConversionCommand, runnerConversionScript, RUNNER_ENSURE_TIMEOUT_S, SERVE_CMD_TIMEOUT_S, SERVE_PROBE_TIMEOUT_S, UNPUBLISH_ATTEMPTS, unpublishServeScript } from "../src/conversion.ts";
 import { createDashboardHandlers } from "../src/dashboard.ts";
+import { MAX_COMMAND_SECONDS } from "../src/executor.ts";
 import { BoatMachineOps, type ProviderConfig } from "../src/provider.ts";
 import { BB_RUNNER_GUARD_SH, RUNNER_ENSURE_SH } from "../src/runner-files.generated.ts";
 import { actionsFor } from "../ui/actions.ts";
@@ -103,11 +104,71 @@ describe("runner conversion script (T6)", () => {
   });
 });
 
+describe("conversion unpublishes the box's own bb server with a bounded retry (T19)", () => {
+  // A concurrent pi-boot-init/bb-ensure.sh can re-publish between the off and the
+  // verify. The unpublish must keep turning Serve off until `served` is false.
+  function run(servedBody: string, attempts: number) {
+    const dir = mkdtempSync(join(tmpdir(), "unpublish-"));
+    const log = join(dir, "calls");
+    const harness = [
+      `servedCalls=0`,
+      `served() { servedCalls=$((servedCalls+1)); ${servedBody}; }`,
+      `timeout() { echo "$*" >>"${log}"; return 0; }`,
+      "sleep() { :; }",
+      unpublishServeScript(attempts),
+      `echo "probes=$servedCalls"`,
+    ].join("\n");
+    const out = execFileSync("bash", ["-c", harness], { encoding: "utf8" });
+    const calls = readFileSync(log, "utf8").trim().split("\n").filter(Boolean);
+    return { calls, probes: out.trim() };
+  }
+
+  it("retries serve off/reset until nothing is served, then stops", () => {
+    // "still served" for the first two probes, then clear.
+    const r = run("[ $servedCalls -le 2 ]", 15);
+    assert.equal(r.probes, "probes=3", "stopped as soon as served was false");
+    assert.equal(r.calls.length, 2, "one off and one reset");
+    assert.match(r.calls[0]!, /tailscale serve --https=443 off/);
+    assert.match(r.calls[1]!, /tailscale serve reset/);
+  });
+
+  it("is bounded: an unpublish that never clears stops after the attempt bound", () => {
+    const r = run("true", 15);
+    assert.equal(r.probes, "probes=30", "15 attempts × (off check + reset check)");
+    assert.equal(r.calls.length, 30);
+  });
+});
+
+describe("conversion timeout budget (T19)", () => {
+  // Boat runs one synchronous command for at most MAX_COMMAND_SECONDS, and the
+  // executor clamps the conversion's timeout to it. The script's own hard `timeout`
+  // bounds must therefore sum below the conversion timeout, or a slow box can be
+  // killed mid-conversion (e.g. before runner-ensure completes).
+  const script = runnerConversionScript();
+  const perAttemptS = SERVE_PROBE_TIMEOUT_S * 2 + SERVE_CMD_TIMEOUT_S * 2 + 2; // served, off, served, reset, sleep
+  const unpublishS = UNPUBLISH_ATTEMPTS * perAttemptS + SERVE_PROBE_TIMEOUT_S; // + the verify's own probe
+  const listeningS = 20 * 3; // up to 20 × (timeout 2 + sleep 1)
+  const fixedSlackS = 120; // local systemctl / heredoc steps
+  const worstS = unpublishS + RUNNER_ENSURE_TIMEOUT_S + listeningS + fixedSlackS;
+
+  it("fits the worst-case bounded steps inside the conversion timeout", () => {
+    assert.ok(worstS * 1000 < CONVERSION_TIMEOUT_MS, `worst case ${worstS}s >= conversion timeout ${CONVERSION_TIMEOUT_MS / 1000}s`);
+    assert.ok(CONVERSION_TIMEOUT_MS <= MAX_COMMAND_SECONDS * 1000, "Boat caps one synchronous command at MAX_COMMAND_SECONDS");
+  });
+
+  it("wires the budget constants into the generated script", () => {
+    assert.ok(script.includes(`timeout ${RUNNER_ENSURE_TIMEOUT_S} systemctl restart bb-runner-ensure.service`));
+    assert.ok(script.includes(`timeout ${SERVE_PROBE_TIMEOUT_S} tailscale serve status`));
+    assert.ok(script.includes(`timeout ${SERVE_CMD_TIMEOUT_S} tailscale serve --https=443 off`));
+  });
+});
+
 describe("provider flow with conversion", () => {
   const config: ProviderConfig = { apiKey: "k", org: "o", source: "fork", from: "bx_base0001", type: "default", ttlSeconds: 3600 };
   function fake(opts: { forkId?: string; probes?: string[]; conversion?: { stdout: string; exitCode: number } }) {
     const events: string[] = [];
     const targets = new Set<string>();
+    const markActive: string[] = [];
     let probe = 0;
     const api = {
       createBox: async () => ({ id: opts.forkId ?? "bx_new1", state: "provisioning" }),
@@ -139,8 +200,9 @@ describe("provider flow with conversion", () => {
       },
       now: () => t,
       sleep: async (ms) => void (t += ms),
+      markActive: async (hostId) => void markActive.push(hostId),
     });
-    return { ops, events, targets };
+    return { ops, events, targets, markActive };
   }
   const report = { step() {}, log() {} };
   const signal = new AbortController().signal;
@@ -171,6 +233,12 @@ describe("provider flow with conversion", () => {
     const f = fake({ probes: ["boot=done\nverified=yes\nensure=yes\n"] });
     await f.ops.resume("host_1", { boxId: "bx_new1", key: "k", dirtyAtSuspend: {} }, async () => {}, report, signal);
     assert.deepEqual(f.events.slice(-3), ["convert", "guard", "bootstrap"]);
+  });
+
+  it("marks the host active when resume completes, so the idle sweep does not suspend it at once", async () => {
+    const f = fake({ probes: ["boot=done\nverified=yes\nensure=yes\n"] });
+    await f.ops.resume("host_1", { boxId: "bx_new1", key: "k", dirtyAtSuspend: {} }, async () => {}, report, signal);
+    assert.deepEqual(f.markActive, ["host_1"], "resume resets the idle clock exactly once, for this host");
   });
 });
 

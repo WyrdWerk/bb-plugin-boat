@@ -19,6 +19,21 @@ export const BB_SERVER_PORT = 38886;
 export const RUNNER_MODE_MARKER = "/etc/bb-runner-mode";
 const EOF_MARK = "BB_RUNNER_FILE_EOF";
 
+/**
+ * Overall bound for one runnerConversionScript run (the executor's timeout). Boat
+ * runs one synchronous command for at most MAX_COMMAND_SECONDS (600 s), so the
+ * script's own hard `timeout` bounds must sum below this. See the budget test.
+ */
+export const CONVERSION_TIMEOUT_MS = 600_000;
+/** `timeout` bound (seconds) on the runner-ensure restart inside the conversion. */
+export const RUNNER_ENSURE_TIMEOUT_S = 240;
+/** `timeout` bound (seconds) on each `tailscale serve status` probe (`served`). */
+export const SERVE_PROBE_TIMEOUT_S = 5;
+/** `timeout` bound (seconds) on each `tailscale serve off`/`reset` command. */
+export const SERVE_CMD_TIMEOUT_S = 8;
+/** Unpublish retry attempts; the publisher is normally gone by conversion time. */
+export const UNPUBLISH_ATTEMPTS = 4;
+
 function heredoc(path: string, mode: string, content: string): string {
   if (content.includes(EOF_MARK)) throw new Error(`embedded file contains ${EOF_MARK}`);
   return [`cat >${path} <<'${EOF_MARK}'`, content.replace(/\n$/, ""), EOF_MARK, `chmod ${mode} ${path}`].join("\n");
@@ -34,7 +49,7 @@ export function runnerConversionScript(): string {
     'uctl() { runuser -u "$U" -- env XDG_RUNTIME_DIR=/run/user/$UID_ DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$UID_/bus timeout 30 systemctl --user "$@"; }',
     'fail() { echo "runner-conversion=failed reason=$1"; exit 1; }',
     `listening() { timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${BB_SERVER_PORT}' 2>/dev/null; }`,
-    `served() { command -v tailscale >/dev/null && timeout 10 tailscale serve status --json 2>/dev/null | grep -q ':${BB_SERVER_PORT}'; }`,
+    `served() { command -v tailscale >/dev/null && timeout ${SERVE_PROBE_TIMEOUT_S} tailscale serve status --json 2>/dev/null | grep -q ':${BB_SERVER_PORT}'; }`,
     "",
     "# 1. Block the box's own bb server (user unit bb-app.service) for good.",
     `touch ${RUNNER_MODE_MARKER}`,
@@ -55,9 +70,10 @@ export function runnerConversionScript(): string {
     "#    command line holds the script text (live run 2026-10-04: exit 143).",
     "pkill -u \"$U\" -f '[b]in/bb-app --server-bind-host' 2>/dev/null || true",
     "",
-    "# 2. Stop publishing it on the box's tailnet name.",
-    "if served; then timeout 15 tailscale serve --https=443 off >/dev/null 2>&1; fi",
-    "if served; then timeout 15 tailscale serve reset >/dev/null 2>&1; fi",
+    "# 2. Stop publishing it on the box's tailnet name. Retry: a concurrent",
+    "#    pi-boot-init (bb-ensure.sh) can re-publish after our off (settle waits",
+    "#    for it, but this is the backstop).",
+    unpublishServeScript(),
     "",
     "# 3. runner-ensure on every runner (fork identity guard, T1). No stamp here:",
     "#    runner-ensure itself wipes any copied identity, then stamps this box.",
@@ -85,7 +101,7 @@ export function runnerConversionScript(): string {
     "systemctl daemon-reload",
     "uctl daemon-reload >/dev/null 2>&1",
     "systemctl enable bb-runner-ensure.service >/dev/null 2>&1",
-    "timeout 360 systemctl restart bb-runner-ensure.service >/dev/null 2>&1 || fail runner-ensure-did-not-run",
+    `timeout ${RUNNER_ENSURE_TIMEOUT_S} systemctl restart bb-runner-ensure.service >/dev/null 2>&1 || fail runner-ensure-did-not-run`,
     "",
     "# 4. Verify.",
     "for _ in $(seq 1 20); do listening || break; sleep 1; done",
@@ -125,4 +141,24 @@ export function parseConversionResult(stdout: string, exitCode: number): Convers
 /** argv for the executor: root via passwordless sudo, script as one bash -c argument. */
 export function runnerConversionCommand(): string[] {
   return ["sudo", "-n", "bash", "-c", runnerConversionScript()];
+}
+
+/**
+ * Stop publishing the box's own bb server, retrying until `served` is false.
+ * A concurrent pi-boot-init/bb-ensure.sh (or boat-heal) can re-publish between the
+ * off and the verify; `chmod -x` cannot stop an instance already running (bash
+ * keeps executing the old inode). Bounded so a stubborn publisher still ends, and
+ * sized so the whole conversion fits inside CONVERSION_TIMEOUT_MS (see the budget
+ * test). Expects `served` to be defined; uses `timeout`, `sleep` and `seq`.
+ */
+export function unpublishServeScript(attempts = UNPUBLISH_ATTEMPTS): string {
+  return [
+    `for _ in $(seq 1 ${attempts}); do`,
+    "  served || break",
+    `  timeout ${SERVE_CMD_TIMEOUT_S} tailscale serve --https=443 off >/dev/null 2>&1 || true`,
+    "  served || break",
+    `  timeout ${SERVE_CMD_TIMEOUT_S} tailscale serve reset >/dev/null 2>&1 || true`,
+    "  sleep 2",
+    "done",
+  ].join("\n");
 }

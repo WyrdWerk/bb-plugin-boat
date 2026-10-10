@@ -131,6 +131,32 @@ describe("boot units: probe and decision (T8 fix 2)", () => {
   });
 });
 
+describe("conversion race: settle waits for pi-boot-init and bb-ensure.sh (T19)", () => {
+  const opts = { stableForMs: 10_000, timeoutMs: 300_000 };
+  // probe() ends with the agents line; append the ensure-running probe.
+  const p = (pi: U, ts: U, ensureRunning: boolean, at = 0) =>
+    parseSettleProbe(`${probe(pi, ts, "done")}ensure-running=${ensureRunning ? "yes" : "no"}\n`, at);
+
+  it("reads the ensure-running probe line", () => {
+    assert.equal(parseSettleProbe("ensure-running=yes\n", 0).ensureRunning, true);
+    assert.equal(parseSettleProbe("ensure-running=no\n", 0).ensureRunning, false);
+  });
+  it("waits while pi-boot-init is still running, even though tailscale-rejoin finished", () => {
+    assert.equal(settleDecision([p("running", "done", false, 0), p("running", "done", false, 12_000)], 0, opts).status, "wait");
+  });
+  it("waits while a bb-ensure.sh process is running (it can re-publish the box's own bb server)", () => {
+    assert.equal(settleDecision([p("done", "done", true, 0), p("done", "done", true, 12_000)], 0, opts).status, "wait");
+  });
+  it("settles only once pi-boot-init is done, no bb-ensure.sh runs, in two matching samples", () => {
+    assert.equal(settleDecision([p("done", "done", false, 0), p("done", "done", false, 12_000)], 0, opts).status, "settled");
+    // A bb-ensure.sh still running in the earlier sample is not stable yet.
+    assert.equal(settleDecision([p("done", "done", true, 0), p("done", "done", false, 12_000)], 0, opts).status, "wait");
+  });
+  it("bounds the wait: a pi-boot-init that never finishes times out", () => {
+    assert.equal(settleDecision([p("running", "done", false, 0), p("running", "done", false, 300_000)], 0, opts).status, "timeout");
+  });
+});
+
 /** Fake box whose probe output follows a script of states over (fake) time. */
 function bootBox(opts: { timeline: (t: number, kicked: boolean) => string; kickExit?: number; conversion?: boolean }) {
   const events: string[] = [];

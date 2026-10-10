@@ -114,6 +114,12 @@ marker guard cannot stop an already-running `bb-ensure.sh` instance (bash
 keeps executing the old inode). Do not treat this check as passed merely
 because `bb-app.service` is inactive.
 
+**Fixed in code (pending a live re-test):** settle now also waits, bounded by its
+timeout, for `pi-boot-init` to finish and for no `bb-ensure.sh` process to run
+(`conversionRacePending` in `src/policy.ts`), and the unpublish retries
+`tailscale serve --https=443 off` / `reset` until nothing serves :38886
+(`unpublishServeScript` in `src/conversion.ts`) instead of running once.
+
 ## What the plugin installs on each runner (never on the base)
 
 - `/etc/bb-runner-mode` marker and a `bb-app.service` drop-in that keeps a standalone bb
